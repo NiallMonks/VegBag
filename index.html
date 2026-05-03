@@ -808,7 +808,12 @@ async function api(params) {
   const url = scriptUrl();
   if (!url) throw new Error('No Google Script URL configured. Go to Admin → Settings.');
   const qs = new URLSearchParams(params).toString();
-  const res = await fetch(url + (url.includes('?') ? '&' : '?') + qs);
+  const fullUrl = url + (url.includes('?') ? '&' : '?') + qs;
+  const res = await fetch(fullUrl, {
+    method: 'GET',
+    redirect: 'follow',
+    mode: 'cors',
+  });
   const data = await res.json();
   if (data.error) throw new Error(data.error);
   return data;
