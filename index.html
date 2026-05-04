@@ -785,7 +785,11 @@ function getMonday(d) {
 }
 function weekKey(d) {
   const m = getMonday(d);
-  return m.toISOString().slice(0,10);
+  // Use local date (not UTC) to avoid timezone shifting the week
+  const yyyy = m.getFullYear();
+  const mm = String(m.getMonth()+1).padStart(2,'0');
+  const dd = String(m.getDate()).padStart(2,'0');
+  return yyyy + '-' + mm + '-' + dd;
 }
 function weekDisplay(wk) {
   const d = new Date(wk + 'T12:00:00');
@@ -804,54 +808,40 @@ function addWeeks(wk, n) {
 // ══════════════════════════════════════
 function scriptUrl() { return localStorage.getItem(SCRIPT_URL_KEY) || ''; }
 
-// READ actions use JSONP (bypasses CORS for GET)
-function apiRead(params) {
+// All API calls use JSONP — works for both reads and writes via GET params
+function api(params) {
   const url = scriptUrl();
-  if (!url) return Promise.reject(new Error('No Google Script URL configured.'));
+  if (!url) return Promise.reject(new Error('No Google Script URL configured. Go to Admin → Settings.'));
+
+  // For saveStaff, encode the staff JSON as base64 to avoid URL encoding issues
+  if (params.action === 'saveStaff' && params.staff) {
+    params = Object.assign({}, params, { staff: btoa(unescape(encodeURIComponent(params.staff))) });
+  }
+
   const qs = new URLSearchParams(params).toString();
   const fullUrl = url + (url.includes('?') ? '&' : '?') + qs;
+
   return new Promise((resolve, reject) => {
     const cbName = 'gasCallback_' + Date.now();
     const script = document.createElement('script');
-    const timeout = setTimeout(() => { cleanup(); reject(new Error('Request timed out.')); }, 15000);
-    window[cbName] = function(data) { cleanup(); if (data && data.error) reject(new Error(data.error)); else resolve(data); };
-    function cleanup() { clearTimeout(timeout); delete window[cbName]; if (script.parentNode) script.parentNode.removeChild(script); }
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('Request timed out. Check your Script URL is deployed correctly.'));
+    }, 20000);
+    window[cbName] = function(data) {
+      cleanup();
+      if (data && data.error) reject(new Error(data.error));
+      else resolve(data);
+    };
+    function cleanup() {
+      clearTimeout(timeout);
+      delete window[cbName];
+      if (script.parentNode) script.parentNode.removeChild(script);
+    }
     script.src = fullUrl + '&callback=' + cbName;
     script.onerror = () => { cleanup(); reject(new Error('Load failed — check your Script URL.')); };
     document.head.appendChild(script);
   });
-}
-
-// WRITE actions use hidden form POST (bypasses CORS for writes)
-function apiWrite(params) {
-  const url = scriptUrl();
-  if (!url) return Promise.reject(new Error('No Google Script URL configured.'));
-  return new Promise((resolve, reject) => {
-    const cbName = 'gasWCb_' + Date.now();
-    const iframe = document.createElement('iframe');
-    iframe.name = cbName; iframe.style.display = 'none';
-    document.body.appendChild(iframe);
-    const form = document.createElement('form');
-    form.method = 'POST'; form.action = url; form.target = cbName; form.style.display = 'none';
-    Object.entries(params).forEach(([k,v]) => {
-      const inp = document.createElement('input'); inp.type='hidden'; inp.name=k; inp.value=v; form.appendChild(inp);
-    });
-    // No JSONP callback needed for writes — we just trust it worked if no network error
-    window[cbName + '_done'] = false;
-    const timeout = setTimeout(() => { cleanup(); resolve({ ok: true }); }, 8000);
-    function cleanup() { clearTimeout(timeout); if (iframe.parentNode) iframe.parentNode.removeChild(iframe); if (form.parentNode) form.parentNode.removeChild(form); }
-    iframe.onload = () => { setTimeout(() => { cleanup(); resolve({ ok: true }); }, 300); };
-    iframe.onerror = () => { cleanup(); reject(new Error('Write failed.')); };
-    document.body.appendChild(form);
-    form.submit();
-  });
-}
-
-// Route reads vs writes
-async function api(params) {
-  const writes = ['saveStaff','setAlwaysNo','submit','saveNote'];
-  if (writes.includes(params.action)) return apiWrite(params);
-  return apiRead(params);
 }
 
 // ══════════════════════════════════════
