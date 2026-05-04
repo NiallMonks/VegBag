@@ -688,22 +688,25 @@
   <!-- SETTINGS TAB -->
   <div class="admin-panel" id="panel-settings">
     <div class="settings-section">
-      <h3>Google Script Connection</h3>
+      <h3>Supabase Connection</h3>
       <div class="connection-status" id="conn-status"></div>
       <div class="field-row">
-        <input type="url" id="script-url" placeholder="Paste your Google Script Web App URL here" oninput="clearConnStatus()">
+        <input type="url" id="supa-url" placeholder="Supabase Project URL (https://xxxx.supabase.co)" oninput="clearConnStatus()">
       </div>
       <div class="field-row">
-        <input type="text" id="app-link" placeholder="Your Netlify/Vercel app URL (for WhatsApp reminder)">
+        <input type="text" id="supa-key" placeholder="Supabase anon/public API key" oninput="clearConnStatus()">
       </div>
-      <button class="btn-save-settings" onclick="saveScriptUrl()">Save &amp; Test Connection</button>
+      <div class="field-row">
+        <input type="text" id="app-link" placeholder="Your GitHub Pages URL (for WhatsApp reminder)">
+      </div>
+      <button class="btn-save-settings" onclick="saveSupaConfig()">Save &amp; Test Connection</button>
     </div>
 
     <div class="settings-section">
       <h3>Staff Names</h3>
       <div id="staff-name-list"></div>
       <button class="btn-add" onclick="addStaffField()">+ Add staff member</button>
-      <button class="btn-save-settings" onclick="saveStaffNames()">Save Staff Names</button>
+      <button class="btn-save-settings" onclick="saveStaffNamesUI()">Save Staff Names</button>
     </div>
 
     <div class="settings-section">
@@ -760,17 +763,18 @@
 // ══════════════════════════════════════
 // STATE
 // ══════════════════════════════════════
-const ADMIN_PIN_KEY   = 'la_admin_pin';
-const SCRIPT_URL_KEY  = 'la_script_url';
-const APP_LINK_KEY    = 'la_app_link';
+const ADMIN_PIN_KEY  = 'la_admin_pin';
+const SUPA_URL_KEY   = 'la_supa_url';
+const SUPA_KEY_KEY   = 'la_supa_key';
+const APP_LINK_KEY   = 'la_app_link';
 
 let state = {
-  staff:      [],   // [{name, alwaysNo}]
-  weekData:   {},   // {name: {choice, location, note}}
-  currentWeek: '',
-  viewWeek:    '',
+  staff:        [],
+  weekData:     {},
+  currentWeek:  '',
+  viewWeek:     '',
   adminLoggedIn: false,
-  activeTab:  'responses',
+  activeTab:    'responses',
   modal: { name: '', choice: '', location: '' }
 };
 
@@ -785,16 +789,15 @@ function getMonday(d) {
 }
 function weekKey(d) {
   const m = getMonday(d);
-  // Use local date (not UTC) to avoid timezone shifting the week
   const yyyy = m.getFullYear();
-  const mm = String(m.getMonth()+1).padStart(2,'0');
-  const dd = String(m.getDate()).padStart(2,'0');
+  const mm   = String(m.getMonth()+1).padStart(2,'0');
+  const dd   = String(m.getDate()).padStart(2,'0');
   return yyyy + '-' + mm + '-' + dd;
 }
 function weekDisplay(wk) {
   const d = new Date(wk + 'T12:00:00');
   const end = new Date(d); end.setDate(end.getDate()+6);
-  const fmt = dd => dd.toLocaleDateString('en-GB',{day:'numeric',month:'short'});
+  const fmt = x => x.toLocaleDateString('en-GB',{day:'numeric',month:'short'});
   return `Week of ${fmt(d)} – ${fmt(end)}`;
 }
 function addWeeks(wk, n) {
@@ -804,44 +807,88 @@ function addWeeks(wk, n) {
 }
 
 // ══════════════════════════════════════
-// API
+// SUPABASE API
 // ══════════════════════════════════════
-function scriptUrl() { return localStorage.getItem(SCRIPT_URL_KEY) || ''; }
+function supaConfig() {
+  return {
+    url: localStorage.getItem(SUPA_URL_KEY) || '',
+    key: localStorage.getItem(SUPA_KEY_KEY) || ''
+  };
+}
 
-// All API calls use JSONP — works for both reads and writes via GET params
-function api(params) {
-  const url = scriptUrl();
-  if (!url) return Promise.reject(new Error('No Google Script URL configured. Go to Admin → Settings.'));
-
-  // For saveStaff, encode the staff JSON as base64 to avoid URL encoding issues
-  if (params.action === 'saveStaff' && params.staff) {
-    params = Object.assign({}, params, { staff: btoa(unescape(encodeURIComponent(params.staff))) });
-  }
-
-  const qs = new URLSearchParams(params).toString();
-  const fullUrl = url + (url.includes('?') ? '&' : '?') + qs;
-
-  return new Promise((resolve, reject) => {
-    const cbName = 'gasCallback_' + Date.now();
-    const script = document.createElement('script');
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error('Request timed out. Check your Script URL is deployed correctly.'));
-    }, 20000);
-    window[cbName] = function(data) {
-      cleanup();
-      if (data && data.error) reject(new Error(data.error));
-      else resolve(data);
-    };
-    function cleanup() {
-      clearTimeout(timeout);
-      delete window[cbName];
-      if (script.parentNode) script.parentNode.removeChild(script);
+async function supaFetch(path, method='GET', body=null) {
+  const { url, key } = supaConfig();
+  if (!url || !key) throw new Error('Supabase not configured. Go to Admin → Settings.');
+  const opts = {
+    method,
+    headers: {
+      'apikey': key,
+      'Authorization': 'Bearer ' + key,
+      'Content-Type': 'application/json',
+      'Prefer': method === 'POST' ? 'return=representation' : ''
     }
-    script.src = fullUrl + '&callback=' + cbName;
-    script.onerror = () => { cleanup(); reject(new Error('Load failed — check your Script URL.')); };
-    document.head.appendChild(script);
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(url + '/rest/v1/' + path, opts);
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error('Supabase error: ' + err);
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : [];
+}
+
+// ── Staff ──
+async function loadStaff() {
+  const rows = await supaFetch('staff?select=*&order=name');
+  state.staff = rows.map(r => ({ id: r.id, name: r.name, alwaysNo: r.always_no }));
+}
+
+async function saveStaffNames(staffArray) {
+  // Delete all, re-insert
+  await supaFetch('staff?id=gte.0', 'DELETE');
+  if (staffArray.length) {
+    await supaFetch('staff', 'POST', staffArray.map(s => ({ name: s.name, always_no: s.alwaysNo || false })));
+  }
+}
+
+async function setAlwaysNo(name, value) {
+  await supaFetch('staff?name=eq.' + encodeURIComponent(name), 'PATCH', { always_no: value });
+  const s = state.staff.find(x => x.name === name);
+  if (s) s.alwaysNo = value;
+}
+
+// ── Choices ──
+async function loadWeekData() {
+  const week = state.viewWeek;
+  const rows = await supaFetch('choices?week=eq.' + week + '&select=*');
+  state.weekData = {};
+  rows.forEach(r => {
+    state.weekData[r.staff_name] = { choice: r.choice, location: r.location || '', note: r.note || '' };
   });
+  // sync alwaysNo into staff
+  state.staff.forEach(s => {
+    if (state.weekData[s.name]) {
+      // already loaded
+    }
+  });
+  renderStaffGrid();
+  if (state.adminLoggedIn) renderAdmin();
+}
+
+async function submitChoice(name, choice, location) {
+  const week = state.currentWeek;
+  // Upsert — Supabase handles insert-or-update via onConflict
+  await supaFetch('choices?on_conflict=week,staff_name', 'POST', {
+    week, staff_name: name, choice, location: location || '', note: ''
+  });
+  if (!state.weekData[name]) state.weekData[name] = {};
+  state.weekData[name].choice = choice;
+  state.weekData[name].location = location || '';
+}
+
+async function saveNote(week, name, note) {
+  await supaFetch('choices?week=eq.' + week + '&staff_name=eq.' + encodeURIComponent(name), 'PATCH', { note });
 }
 
 // ══════════════════════════════════════
@@ -851,12 +898,10 @@ async function init() {
   state.currentWeek = weekKey(new Date());
   state.viewWeek    = state.currentWeek;
   document.getElementById('header-week').textContent = weekDisplay(state.currentWeek).replace('Week of ','');
-
   try {
     await loadStaff();
     await loadWeekData();
   } catch(e) {
-    // No script URL yet — render with empty state
     renderStaffGrid();
   }
   hideLoading();
@@ -866,27 +911,6 @@ function hideLoading() {
   const el = document.getElementById('loading');
   el.style.opacity = '0';
   setTimeout(() => el.style.display = 'none', 300);
-}
-
-// ══════════════════════════════════════
-// DATA LOADING
-// ══════════════════════════════════════
-async function loadStaff() {
-  const data = await api({ action: 'getStaff' });
-  state.staff = data.staff || [];
-}
-
-async function loadWeekData() {
-  const data = await api({ action: 'getWeek', week: state.viewWeek });
-  state.weekData = {};
-  (data.rows || []).forEach(r => {
-    state.weekData[r.name] = r;
-    // sync alwaysNo back
-    const s = state.staff.find(x => x.name === r.name);
-    if (s) s.alwaysNo = r.alwaysNo;
-  });
-  renderStaffGrid();
-  if (state.adminLoggedIn) renderAdmin();
 }
 
 // ══════════════════════════════════════
@@ -922,9 +946,7 @@ function renderStaffGrid() {
     }
 
     card.innerHTML = `<div class="sname">${s.name}</div>${badgeHtml}${locHtml}`;
-    if (!s.alwaysNo && isCurrentWeek) {
-      card.onclick = () => openModal(s.name);
-    }
+    if (!s.alwaysNo && isCurrentWeek) card.onclick = () => openModal(s.name);
     grid.appendChild(card);
   });
 }
@@ -942,9 +964,7 @@ function openModal(name) {
   document.getElementById('btn-confirm-choice').disabled = true;
   document.getElementById('modal-backdrop').classList.add('open');
 }
-function closeModal() {
-  document.getElementById('modal-backdrop').classList.remove('open');
-}
+function closeModal() { document.getElementById('modal-backdrop').classList.remove('open'); }
 function showStep(id) {
   ['step-choice','step-location','step-done'].forEach(s => {
     document.getElementById(s).className = 'modal-step' + (s===id ? ' active' : '');
@@ -957,10 +977,8 @@ function selectChoice(c) {
   document.getElementById('btn-confirm-choice').disabled = false;
 }
 function proceedFromChoice() {
-  if (state.modal.choice === 'no') {
-    submitFinal();
-  } else {
-    // show location step
+  if (state.modal.choice === 'no') { submitFinal(); }
+  else {
     document.getElementById('btn-plum').classList.remove('selected');
     document.getElementById('btn-burn').classList.remove('selected');
     document.getElementById('btn-confirm-loc').disabled = true;
@@ -979,20 +997,14 @@ function confirmSubmit() { submitFinal(); }
 async function submitFinal() {
   const { name, choice, location } = state.modal;
   try {
-    await api({ action:'submit', week:state.currentWeek, name, choice, location });
-    // update local state
-    if (!state.weekData[name]) state.weekData[name] = {};
-    state.weekData[name].choice = choice;
-    state.weekData[name].location = location || '';
+    await submitChoice(name, choice, location);
     renderStaffGrid();
     const msg = choice==='yes'
       ? `Got it! Your bag is requested for ${location}.`
       : `No problem — see you next week!`;
     document.getElementById('done-message').textContent = msg;
     showStep('step-done');
-  } catch(e) {
-    alert('Could not save: ' + e.message);
-  }
+  } catch(e) { alert('Could not save: ' + e.message); }
 }
 
 // ══════════════════════════════════════
@@ -1007,8 +1019,7 @@ function showAdminLogin() {
   showPage('page-admin-login');
 }
 function checkPin() {
-  const val = document.getElementById('pin-input').value;
-  if (val === getAdminPin()) {
+  if (document.getElementById('pin-input').value === getAdminPin()) {
     state.adminLoggedIn = true;
     document.getElementById('btn-logout').style.display = '';
     document.getElementById('pin-error').textContent = '';
@@ -1025,12 +1036,10 @@ function logout() {
   document.getElementById('btn-logout').style.display = 'none';
   showPage('page-staff');
 }
-
 function showPage(id) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.getElementById(id).classList.add('active');
 }
-
 function switchTab(tab) {
   state.activeTab = tab;
   document.querySelectorAll('.admin-tab').forEach((t,i) => {
@@ -1042,7 +1051,6 @@ function switchTab(tab) {
   if (tab==='reminder') buildReminder();
   if (tab==='settings') renderSettings();
 }
-
 function changeWeek(dir) {
   state.viewWeek = addWeeks(state.viewWeek, dir);
   document.getElementById('btn-next-week').disabled = state.viewWeek >= state.currentWeek;
@@ -1056,13 +1064,12 @@ function renderAdmin() {
     return { name: s.name, alwaysNo: s.alwaysNo, choice, location: entry.location||'', note: entry.note||'' };
   });
 
-  // Stats
-  const yes   = rows.filter(r=>r.choice==='yes').length;
-  const plum  = rows.filter(r=>r.location==='Plumgarths').length;
-  const burn  = rows.filter(r=>r.location==='Burneside').length;
-  const skip  = rows.filter(r=>r.choice==='no').length;
-  const pend  = rows.filter(r=>r.choice==='pending').length;
-  const out   = rows.filter(r=>r.alwaysNo).length;
+  const yes  = rows.filter(r=>r.choice==='yes').length;
+  const plum = rows.filter(r=>r.location==='Plumgarths').length;
+  const burn = rows.filter(r=>r.location==='Burneside').length;
+  const skip = rows.filter(r=>r.choice==='no').length;
+  const pend = rows.filter(r=>r.choice==='pending').length;
+  const out  = rows.filter(r=>r.alwaysNo).length;
 
   document.getElementById('stats-grid').innerHTML = `
     <div class="stat-box"><div class="stat-num">${yes}</div><div class="stat-lbl">Bags needed</div></div>
@@ -1077,6 +1084,7 @@ function renderAdmin() {
   document.getElementById('btn-next-week').disabled = state.viewWeek >= state.currentWeek;
 
   const tbody = document.getElementById('resp-tbody');
+  const isCurrentWeek = state.viewWeek === state.currentWeek;
   tbody.innerHTML = rows.map(r => {
     let pill, action;
     if (r.alwaysNo) {
@@ -1092,44 +1100,28 @@ function renderAdmin() {
       pill = '<span class="pill pill-pend">Pending</span>';
       action = `<button class="btn-sm btn-alwaysno" onclick="adminSetAlwaysNo('${r.name}')">Set always no</button>`;
     }
-    const isCurrentWeek = state.viewWeek === state.currentWeek;
     const noteField = isCurrentWeek
-      ? `<input class="note-input" value="${r.note}" onblur="saveNote('${r.name}', this.value)" placeholder="Add note…">`
+      ? `<input class="note-input" value="${r.note}" onblur="adminSaveNote('${r.name}', this.value)" placeholder="Add note…">`
       : `<span style="font-size:.78rem;color:var(--mid)">${r.note}</span>`;
     return `<tr>
-      <td>${r.name}</td>
-      <td>${pill}</td>
+      <td>${r.name}</td><td>${pill}</td>
       <td style="font-size:.78rem">${r.location ? '📍 '+r.location : '—'}</td>
       <td>${noteField}</td>
       <td>${isCurrentWeek ? action : ''}</td>
     </tr>`;
   }).join('');
-
   buildReminder();
 }
 
 async function adminSetAlwaysNo(name) {
   if (!confirm(`Set "${name}" to Always No? Only admin can reinstate them.`)) return;
-  try {
-    await api({ action:'setAlwaysNo', name, value:'true' });
-    const s = state.staff.find(x=>x.name===name);
-    if (s) s.alwaysNo = true;
-    await loadWeekData();
-  } catch(e) { alert(e.message); }
+  try { await setAlwaysNo(name, true); await loadWeekData(); } catch(e) { alert(e.message); }
 }
-
 async function adminReinstate(name) {
-  try {
-    await api({ action:'setAlwaysNo', name, value:'false' });
-    const s = state.staff.find(x=>x.name===name);
-    if (s) s.alwaysNo = false;
-    await loadWeekData();
-  } catch(e) { alert(e.message); }
+  try { await setAlwaysNo(name, false); await loadWeekData(); } catch(e) { alert(e.message); }
 }
-
-async function saveNote(name, note) {
-  try { await api({ action:'saveNote', week:state.viewWeek, name, note }); }
-  catch(e) { console.error(e); }
+async function adminSaveNote(name, note) {
+  try { await saveNote(state.viewWeek, name, note); } catch(e) { console.error(e); }
 }
 
 // ══════════════════════════════════════
@@ -1141,20 +1133,20 @@ function buildReminder() {
     .map(s => '• ' + s.name);
   const appLink = localStorage.getItem(APP_LINK_KEY) || '[your app link]';
   const d = new Date(state.currentWeek + 'T12:00:00');
-  d.setDate(d.getDate()+2); // Wednesday
+  d.setDate(d.getDate()+2);
   const wed = d.toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long'});
+  const msg = `Hi team 🥦 Don't forget to request your veg bag this week!
 
-  const msg = `Hi team 🥦 Don't forget to request your veg bag this week!\n\nDeadline: ${wed} at 5pm\n${appLink}\n`
-    + (pending.length ? `\nStill to respond:\n${pending.join('\n')}` : '\nEveryone has responded — thank you! ✅');
-
+Deadline: ${wed} at 5pm
+${appLink}
+`
+    + (pending.length ? ('\nStill to respond:\n' + pending.join('\n')) : '\nEveryone has responded — thank you! ✅');
   document.getElementById('reminder-text').textContent = msg;
 }
-
 function openWhatsApp() {
   const msg = document.getElementById('reminder-text').textContent;
   window.open('https://wa.me/?text=' + encodeURIComponent(msg), '_blank');
 }
-
 function copyReminder() {
   navigator.clipboard.writeText(document.getElementById('reminder-text').textContent)
     .then(() => alert('Copied to clipboard!'));
@@ -1164,11 +1156,11 @@ function copyReminder() {
 // SETTINGS
 // ══════════════════════════════════════
 function renderSettings() {
-  document.getElementById('script-url').value = localStorage.getItem(SCRIPT_URL_KEY) || '';
-  document.getElementById('app-link').value   = localStorage.getItem(APP_LINK_KEY) || '';
+  document.getElementById('supa-url').value  = localStorage.getItem(SUPA_URL_KEY) || '';
+  document.getElementById('supa-key').value  = localStorage.getItem(SUPA_KEY_KEY) || '';
+  document.getElementById('app-link').value  = localStorage.getItem(APP_LINK_KEY) || '';
   renderStaffNameList();
 }
-
 function renderStaffNameList() {
   const list = document.getElementById('staff-name-list');
   list.innerHTML = state.staff.map((s,i) =>
@@ -1178,18 +1170,15 @@ function renderStaffNameList() {
     </div>`
   ).join('');
 }
-
 function addStaffField() {
   state.staff.push({ name:'', alwaysNo: false });
   renderStaffNameList();
 }
-
 function removeStaffField(i) {
   state.staff.splice(i, 1);
   renderStaffNameList();
 }
-
-async function saveStaffNames() {
+async function saveStaffNamesUI() {
   const inputs = document.querySelectorAll('[id^="sname-"]');
   const updated = [];
   inputs.forEach((inp,i) => {
@@ -1197,29 +1186,25 @@ async function saveStaffNames() {
     if (name) updated.push({ name, alwaysNo: state.staff[i]?.alwaysNo || false });
   });
   try {
-    await api({ action:'saveStaff', staff: JSON.stringify(updated) });
+    await saveStaffNames(updated);
     state.staff = updated;
     renderStaffGrid();
     alert('Staff names saved!');
   } catch(e) { alert('Error saving staff: ' + e.message); }
 }
-
 function clearConnStatus() {
   const el = document.getElementById('conn-status');
-  el.className = 'connection-status';
-  el.textContent = '';
+  el.className = 'connection-status'; el.textContent = '';
 }
-
-async function saveScriptUrl() {
-  const url = document.getElementById('script-url').value.trim();
+async function saveSupaConfig() {
+  const url = document.getElementById('supa-url').value.trim().replace(/\/$/, '');
+  const key = document.getElementById('supa-key').value.trim();
   const appLink = document.getElementById('app-link').value.trim();
   const el = document.getElementById('conn-status');
-
-  if (!url) { el.className='connection-status status-err'; el.textContent='Please paste your Google Script URL first.'; return; }
-
-  localStorage.setItem(SCRIPT_URL_KEY, url);
+  if (!url || !key) { el.className='connection-status status-err'; el.textContent='Please fill in both fields.'; return; }
+  localStorage.setItem(SUPA_URL_KEY, url);
+  localStorage.setItem(SUPA_KEY_KEY, key);
   if (appLink) localStorage.setItem(APP_LINK_KEY, appLink);
-
   el.className='connection-status status-ok'; el.textContent='Testing connection…';
   try {
     await loadStaff();
@@ -1231,7 +1216,6 @@ async function saveScriptUrl() {
     el.textContent = '✗ Connection failed: ' + e.message;
   }
 }
-
 function changePin() {
   const p1 = document.getElementById('new-pin').value;
   const p2 = document.getElementById('new-pin-confirm').value;
