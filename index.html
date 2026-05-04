@@ -809,10 +809,14 @@ function addWeeks(wk, n) {
 // ══════════════════════════════════════
 // SUPABASE API
 // ══════════════════════════════════════
+// Hardcoded credentials — every device connects automatically
+const SUPA_URL_HARDCODED = 'https://rqdquhgeeybzzdndplix.supabase.co';
+const SUPA_KEY_HARDCODED = 'sb_publishable_WPOBTeFyKDLwEb_WCQ-3Ag_rLTobz3t';
+
 function supaConfig() {
   return {
-    url: localStorage.getItem(SUPA_URL_KEY) || '',
-    key: localStorage.getItem(SUPA_KEY_KEY) || ''
+    url: SUPA_URL_HARDCODED,
+    key: SUPA_KEY_HARDCODED
   };
 }
 
