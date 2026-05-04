@@ -804,39 +804,54 @@ function addWeeks(wk, n) {
 // ══════════════════════════════════════
 function scriptUrl() { return localStorage.getItem(SCRIPT_URL_KEY) || ''; }
 
-async function api(params) {
+// READ actions use JSONP (bypasses CORS for GET)
+function apiRead(params) {
   const url = scriptUrl();
-  if (!url) throw new Error('No Google Script URL configured. Go to Admin → Settings.');
+  if (!url) return Promise.reject(new Error('No Google Script URL configured.'));
   const qs = new URLSearchParams(params).toString();
   const fullUrl = url + (url.includes('?') ? '&' : '?') + qs;
-
-  // Google Apps Script requires no-cors for cross-origin fetch,
-  // but then we can't read the response. Instead we use a script tag (JSONP-style)
-  // by asking GAS to wrap in a callback.
   return new Promise((resolve, reject) => {
     const cbName = 'gasCallback_' + Date.now();
     const script = document.createElement('script');
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error('Request timed out. Check your Script URL is correct and deployed as "Anyone".'));
-    }, 15000);
-
-    window[cbName] = function(data) {
-      cleanup();
-      if (data && data.error) reject(new Error(data.error));
-      else resolve(data);
-    };
-
-    function cleanup() {
-      clearTimeout(timeout);
-      delete window[cbName];
-      if (script.parentNode) script.parentNode.removeChild(script);
-    }
-
+    const timeout = setTimeout(() => { cleanup(); reject(new Error('Request timed out.')); }, 15000);
+    window[cbName] = function(data) { cleanup(); if (data && data.error) reject(new Error(data.error)); else resolve(data); };
+    function cleanup() { clearTimeout(timeout); delete window[cbName]; if (script.parentNode) script.parentNode.removeChild(script); }
     script.src = fullUrl + '&callback=' + cbName;
     script.onerror = () => { cleanup(); reject(new Error('Load failed — check your Script URL.')); };
     document.head.appendChild(script);
   });
+}
+
+// WRITE actions use hidden form POST (bypasses CORS for writes)
+function apiWrite(params) {
+  const url = scriptUrl();
+  if (!url) return Promise.reject(new Error('No Google Script URL configured.'));
+  return new Promise((resolve, reject) => {
+    const cbName = 'gasWCb_' + Date.now();
+    const iframe = document.createElement('iframe');
+    iframe.name = cbName; iframe.style.display = 'none';
+    document.body.appendChild(iframe);
+    const form = document.createElement('form');
+    form.method = 'POST'; form.action = url; form.target = cbName; form.style.display = 'none';
+    Object.entries(params).forEach(([k,v]) => {
+      const inp = document.createElement('input'); inp.type='hidden'; inp.name=k; inp.value=v; form.appendChild(inp);
+    });
+    // No JSONP callback needed for writes — we just trust it worked if no network error
+    window[cbName + '_done'] = false;
+    const timeout = setTimeout(() => { cleanup(); resolve({ ok: true }); }, 8000);
+    function cleanup() { clearTimeout(timeout); if (iframe.parentNode) iframe.parentNode.removeChild(iframe); if (form.parentNode) form.parentNode.removeChild(form); }
+    iframe.onload = () => { setTimeout(() => { cleanup(); resolve({ ok: true }); }, 300); };
+    iframe.onerror = () => { cleanup(); reject(new Error('Write failed.')); };
+    document.body.appendChild(form);
+    form.submit();
+  });
+}
+
+// Route reads vs writes
+async function api(params) {
+  const writes = ['saveStaff','setAlwaysNo','submit','saveNote'];
+  if (writes.includes(params.action)) return apiWrite(params);
+  return apiRead(params);
 }
 
 // ══════════════════════════════════════
